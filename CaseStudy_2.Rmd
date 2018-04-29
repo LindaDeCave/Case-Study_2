@@ -1,0 +1,309 @@
+
+---
+title: "Case Study 2"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+
+library(corrplot) 
+
+library(caTools) 
+
+library(glmnet) 
+
+library(randomForest) 
+
+library(klaR) 
+```
+
+## READING THE DATA
+
+```{r}
+train = read_csv("/Users/linda/Desktop/train-data.csv", col_types = cols())
+forecast = read_csv("/Users/linda/Desktop/forecast-data.csv",col_types = cols())
+```
+
+Information on training data
+
+```{r}
+str(train)
+```
+
+Information on forecasting data
+
+```{r}
+str(forecast)
+```
+
+Changing characters into levels
+
+```{r}
+train$state = as.factor(train$state)
+train$subject = as.factor(train$subject)
+forecast$state = as.factor(forecast$state)
+forecast$subject = as.factor(forecast$subject)
+```
+
+## (1) The prediction problem and the difficulties in training a model with this dataset.  
+
+This is a supervised learning binary classification problem, since we have a training set with labeled observations and the outcome variable (labels) can take only two values, 0 or 1. We will start facing it using logistic regression.  
+
+The difficulties in training a model with the above data set might be linked to the presence of missing data, to high correlation between variables and to the fact that the output class is imbalanced.
+
+Number of NAs in train -> no missing values in train.
+
+```{r}
+sapply(train, function(x) sum(is.na(x)))
+```
+
+Analysis of correlation matrix for the numeric variables of train.  
+
+In presence of multicollinearity, we can no longer make much sense of the usual interpretation of a slope coefficient as the change in the mean response for each additional unit increase in the predictor $x_k$, when all the other predictors are held constant. Indeed it wouldn't make sense to talk about holding the values of correlated predictors constant, since changing one predictor necessarily would change the values of the others.
+In other words, when predictor variables are correlated, the estimated regression coefficient of any variable depends on which other predictor variables are included in the model.  
+One solution could be to use only one between two correlated coefficients to do predictions. Another one could be to use a L2-regularized classification, that will take care of the correlations between variables by himself.   
+
+In the train data set there are indeed highly correlated numerical predictors.
+
+```{r}
+cortrain = cor(train[,5:19])
+diag(cortrain) = 0
+max = max(cortrain)
+max
+min = min(cortrain)
+min
+which(cortrain == max, arr.ind = TRUE)
+which(cortrain == min, arr.ind = TRUE)
+```
+
+Visualization of the correlation matrix.
+
+```{r}
+corrplot(cortrain, method = "circle") # Color intensity and the size of the circle are proportional to the correlation coefficients.
+```
+
+Since "x_min" is correlated with two other predictors, and the same holds true for "y_sd" and "z_sd", I will discard their columns from my two data sets.
+
+```{r}
+drops = c("x_min","y_sd","z_sd")
+train_1 = train[,!(names(train) %in% drops)]
+forecast_1 = forecast[,!(names(forecast) %in% drops)]
+```
+
+Class imbalance problem or Accuracy paradox.  
+We are facing a binary classification problem where `r (sum(train_1$output==1)/nrow(train_1))*100` percent of instances are labeled with class 1 and the remaining `r (sum(train_1$output==0)/nrow(train_1))*100` percent of instances labeled with class 0. In this case we speak about "imbalanced classes".
+
+```{r}
+(sum(train_1$output==1)/nrow(train_1))*100
+```
+
+If we build a model that always predicts 1, we will achieve an accuracy, *(TRUE POS + TRUE NEG)/(NUMBER OF CASES)*, of 84%. The point is that we cannot put trust in this value, since the accuracy is only reflecting the underlying imbalanced class distribution. So accuracy is not the metric to use when working with an imbalanced data set because it is misleading.  
+One can use the confusion matrix (contingency table) and the concepts of *precision* and *recall* to better understand the performance of the algorithm.  
+The contingency table is a useful table that presents the classifiers predicted class distribution with a breakdown of error types.  
+Precision is the number of true positive predictions divided by the total number of positive class values predicted. A low precision can also indicate a large number of False Positives.  
+*PRECISION=(TRUE POS)/(TRUE POS + FALSE POS)*  
+Recall is the number of true positive predictions divided by the number of positive class values in the data. A low recall indicates many False Negatives.  
+*RECALL=(TRUE POS)/(TRUE POS + FALSE NEG)*  
+Finally we can consider also the F1 score, that conveys the balance between the precision and the recall.  
+*F1 = 2x(PRECISION X RECALL)/(PRECISION + RECALL)*  
+Depending on the nature of the unbalanced problem, one can decide to decrease the number of false positive, increasing the precision, or decrease the number of false negative, increasing the recall. One can change this values by playing with the threshold on "prediction" (see later).
+
+## (2) The training and forecast data cover different sets of subjects. How will this difference impact the predictive model?  
+
+```{r}
+sort(levels(train$subject))
+sort(levels(forecast$subject))
+```
+
+Subjects "J" and "E" are present in the "forecast" data set but not in the "train" data set. This implies that, if I train my model using the data set "train", I will not be able to predict the "output" of forecast. In other words my model does not know how to deal with observations with "subject" equal to "E" or "J", i.e. will not be able to compute weights for two variables "subjectE" and "subjectJ".  
+The fastest solution to get a prediction for the "forecast" data set would be that of training the model on the data set "train", and then to delete the rows of "forecast" in which subject = J or subject = E. But this is an arbitrary decision that can affect the quality of the prediction (we don't know what is the weight of "subjectJ" and "subjectE" in predicting the output).  
+Another idea could be to use clustering. Since there are more "subjects" in "forecast" than in "train", I would run a clustering algorithm on "forecast" asking for a number of clusters equal to the number of subjects of "train". I will then substitute "subjectE" (resp. "subjectJ") with the most common subject, different from E and J, of the cluster in which the greatest proportion of "subjectE" (resp. "subjectJ") falls into. If is not possible to take such a decision (e.g. half of subjectE in one cluster and the other half in another), I would just randomly reassign "subjectE" and "subjectJ" to one of the subjects that are present in the "train" data set.  
+Note that the same holds true for the train_1 and forecast_1 data sets.
+
+```{r}
+sort(levels(train_1$subject))
+sort(levels(forecast_1$subject))
+```
+
+Discard "subjectE" and "subjectJ" from forecast_1, obtaining forecast_new.
+
+```{r}
+forecast_new = forecast_1 %>% filter(subject!="E",subject!="J")
+```
+
+## (3) Logistic regression to predict output. 
+
+Logistic regression is a method for fitting a regression curve, $y = f(X)$, when y is a categorical variable. The typical use of this model is predicting $y$ given a set of predictors $X$. The predictors can be continuous, categorical or a mix of both.  
+The categorical variable $y$, in general, can assume different values, but we are in the simplest case scenario where $y$ is binary, i.e. it can assume either the value 1 or 0.  
+Rather than modeling the binary response $y$ directly, logistic regression models the probability that $y$ belongs to a particular category. In other words, if $X$ is our vector of predictors, we want to model $P(y=1|X)$, which we abbreviate by $p(X)$. $p(X)$ will range between 0 and 1. Then, for any given value of $X$, a prediction can be made for $y$. For example, one might predict $y = 1$ for any observation for whom $p(X) > 0.5$. Since in our imbalanced problem with have more $y=1$ than $y=0$, we should increase the treshold to 0.8, in order to decrease the number of False Positive (increase the precision).  
+The relationship between $p(X) = Pr(Y = 1|X)$ and $X$ will be modeled by applying a function that takes value in the interval $[0,1]$, the logistic function, to the linear outcome that we would have expected from a linear regression model, i.e. b_0+XB. In other words:  
+$$p(X) = P(Y=1|X) =\frac{e^{(B_0+XB)}}{(1 + e^{(B_0+XB)})}\quad(LP)$$
+The coefficients $B_0$ and $B$ are estimated using maximum likelihood. Maximum likelihood estimation is a method of estimating the parameters of a statistical model, given observations. MLE attempts to find the parameter values that maximize the likelihood function, given the observations. Informally, the likelihood function is the "probability of obtaining the observed outputs $Y$ given the observed inputs $X$ (the probability of obtaining $Y=1$ given $X$ is modeled by (LP))". So it is a function of $B_0$ and $B$, given $X$ and $Y$, and we want to maximize it. 
+$$Likelihood = \prod_{i=1}^np(X_i)^{Y_i}(1-p(X_i))^{1-Y_i}$$
+
+Split of train_1 data set in training and test data sets.
+
+```{r}
+split = sample.split(train_1$output, SplitRatio = 3/4)   
+training_1 = subset(train_1, split == TRUE)
+nrow(training_1)
+test_1 = subset(train_1, split == FALSE)
+nrow(test_1)
+```
+
+Logistic regression model.
+
+```{r}
+model = glm(output ~ ., data = training_1, family = binomial)
+summary(model)
+```
+
+From this model we can see that the variables that are highly statistically significant in order to predict "output" are "Intercept", "phase", "subjectB", "subjectC", "subjectF", "subjectG" and "subjectM". "subjectG" is the most significant. Note that "subjectA" is used as baseline for the comparisons, namely "subjectA" is the "Intercept". This means that, in our model, the estimate for "subjectA" is the one that determines the probability of having 0 or 1 for the output when all the other predictors are set to zero.  
+
+Prediction of the output of "forecast_1".  
+Note that the argument "type" is used to specify the type of prediction required. The default is on the scale of the linear predictors; the alternative "response" is on the scale of the response variable. Thus for a binomial model the default predictions are of log-odds type, i.e. probabilities on logit scale, $\ln\left(\frac{p}{1-p}\right)$, where $p$ is given by (LP). Since the previous logit function is the inverse of (LP), the default type will give us $B_0+BX$. If we want to have as responses the probabilities, we have to ask type = "response", and we will obtain (LP) instead of $B_0+BX$.  
+The Residual Deviance is a measure of the lack of fit of the model taken as a whole, whereas the Null Deviance is such a measure for a reduced model that only includes the intercept. In our case, we obtain a better fit if we consider all the parameters to predict the output.  
+The AIC is another measure of goodness of fit that takes into account the ability of the model to fit the data and is useful when comparing two models.  
+The line on "Fisher Scoring iterations" tells us how many iterations there were before the process stopped and output the results.  
+
+```{r}
+head(predict(model, forecast_new, type='response'))
+tail(predict(model, forecast_new, type='response'))
+```
+
+## (4) Estimate of the performance one expects from predictions on the forecast set.  
+
+We compute the confusion matrix (col=predicted,row=correct) of the test set to estimate the model. 
+
+```{r}
+prediction_1 = predict(model, test_1, type = 'response') # gives us the probability
+tb1 = table(test_1$output, prediction_1 > 0.5) # compares probabilities larger or smaller than 0.5 to output 0 or 1 using the test_1 set.
+tb1
+(tb1[2,1]/sum(tb1))*100 # percentage of False Negatives
+(tb1[1,2]/sum(tb1))*100 # percentage of False Positive
+```
+
+The percentage of false negative is `r (tb1[2,1]/sum(tb1))*100`, the percentage of false positive is `r (tb1[1,2]/sum(tb1))*100`.  
+We try to decrease the number of cases assigned to 1 by increasing the threshold from 0.5 to 0.8.  
+
+```{r}
+tb2 = table(test_1$output, prediction_1 > 0.8)
+tb2
+(tb2[2,1]/sum(tb2))*100
+(tb2[1,2]/sum(tb2))*100
+```
+
+The percentage of false negative is `r (tb2[2,1]/sum(tb2))*100`, the percentage of false positive is `r (tb2[1,2]/sum(tb2))*100`. So the number of False Positives is actually decreasing, but the number of False Negatives is increasing a lot: playing with the threshold is not helping in preventing overfitting. We have to change strategy.  
+First one should see what happens using an L^2 regularization instead of manually discard some of the correlated variables. Another options could be to use another classification algorithm, such as Random forest.
+
+## RIDGE LOGISTIC REGRESSION
+
+Ridge Regression can be used as a remedial measure taken to alleviate multicollinearity among regression predictor variables in a model. When predictor variables used in regression are highly correlated, the regression coefficient of any variable depend on which other predictor variables are included in the model, and which ones are left out. The idea of Ridge Regression is to decrease the individual impact of parameters of the regression when we have a lot of different (possibly correlated) parameters. It is used to prevent overfitting, i.e. the phenomenon that takes place when we have too many features and the learned hypothesis may fit the training set very well, but fail to generalize to new examples because it is following the training data too closely. When we have correlated parameters, we are prone to overfitting, so it could be useful to use ridge regression by adding a "weighted" sum of the square of the parameters (L^2 norm) to the cost function that we are trying to minimize. In the case of logistic regression, we add this weighted sum of squares to the likelihood function.  
+Since we know that some of our "numerical predictors" are highly correlated, we will train a logistic regression model with L^2 regularization on the "train" data set, instead of using "train_1", and check if the performance of the model improves. We will use the function "glmnet" contained in the package "glmnet" and we will multiply the sum of squares by a coefficient lambda=0.01 (not too big to avoid penalizing a lot the coefficients).
+
+```{r}
+# glmnet wants dummy variables for factors (contrast=FALSE leaves all the levels for each factor) and wants matrices and vectors as arguments
+
+# Split of train data set in training and test data sets.
+
+split = sample.split(train$output, SplitRatio = 3/4)   
+training_ridge = subset(train, split == TRUE)
+test_ridge = subset(train, split == FALSE)
+
+# Strings as factors
+
+training_ridge$state = as.factor(training_ridge$state)
+training_ridge$subject = as.factor(training_ridge$subject)
+test_ridge$state = as.factor(test_ridge$state)
+test_ridge$subject = as.factor(test_ridge$subject)
+
+# Training the model
+
+x = model.matrix(~ ., data=training_ridge[,-4], contrasts.arg = lapply(training_ridge[,2:3], contrasts, contrasts=FALSE))
+y = training_ridge$output
+model_ridge = glmnet(x,y, family = "binomial", alpha=0, lambda=0.01) # alpha=0 for ridge, alpha=1 for lasso
+
+# Testing the model
+
+test_new = model.matrix(~ ., data=test_ridge[,-4], contrasts.arg = lapply(test_ridge[,2:3], contrasts, contrasts=FALSE))
+prediction_2 = predict.glmnet(model_ridge, test_new, type = 'response') 
+tb3 = table(test_ridge$output, prediction_2 > 0.8)
+tb3
+(tb3[2,1]/sum(tb3))*100
+(tb3[1,2]/sum(tb3))*100
+```
+
+The percentage of False Negatives is `r (tb3[2,1]/sum(tb3))*100`, the percentage of False Positives is `r (tb3[1,2]/sum(tb3))*100`. So, with respect to tb2 (same threshold of 0.8), the percentage of false positive is larger, but the percentage of false negative is much smaller.  
+So, if predicting False Positives is a serious problem and predicting False Negatives is not so serious, one should choose the method that brought us to tb2. Note that anyway the method that brought us to tb3 is overall better, since the sum of False Positives and False Negatives of tb3 is smaller with respect to the one of tb2.
+
+```{r}
+(tb2[2,1]+tb2[1,2]) > (tb3[2,1]+tb3[1,2])
+```
+
+## RANDOM FOREST
+
+We check if, using the random forest algorithm, the classification performance on the test set increases.  
+
+```{r}
+# splitting in training and test
+
+split = sample.split(train$output, SplitRatio = 3/4)   
+training_rf = subset(train, split == TRUE)
+test_rf = subset(train, split == FALSE)
+
+# recovering the factors
+
+training_rf$state = as.factor(training_rf$state)
+training_rf$subject = as.factor(training_rf$subject)
+test_rf$state = as.factor(test_rf$state)
+test_rf$subject = as.factor(test_rf$subject)
+
+# training the random forest
+
+rf_classifier = randomForest(as.factor(output) ~ ., data=training_rf)
+
+# evaluating performance on test set
+
+prediction_3 = predict(rf_classifier, test_rf)
+tb4 = table(prediction_3, test_rf$output)
+tb4
+(tb4[2,1]/sum(tb4))*100
+(tb4[1,2]/sum(tb4))*100
+```
+
+Even if the percentage of False Negative, `r (tb4[2,1]/sum(tb4))*100`, is larger than the one of tb3, the percentage of False Positives, `r (tb4[1,2]/sum(tb4))*100`, is much smaller. And also the overall misclassification is better.
+
+```{r}
+(tb3[2,1]+tb3[1,2]) > (tb4[2,1]+tb4[1,2])
+```
+
+## CLUSTERING TO REORGANIZE FORECAST$SUBJECT
+
+As said before, since there are more "subjects" in "forecast" than in "train", it could be a good idea to run a clustering algorithm on "forecast" asking for a number of clusters equal to the number of subjects of "train". The aim would be to substitute "subjectE" (resp. "subjectJ") with the most common subject, different from E and J, of the cluster in which the greatest proportion of "subjectE" (resp. "subjectJ") falls into. If is not possible to take such a decision (e.g. half of subjectE in one cluster and the other half in another), I would just randomly reassign "subjectE" and "subjectJ" to one of the subjects that are present in the "train" data set.  
+Another idea could be to run a clustering algorithm only on the "forecast" columns "state" and "subject" (both categorical) always with 11 clusters (we are forcing the "subject" column to live in 11, not 13, clusters). The aim would be to reassign "subjectE" (resp. "subjectJ") to a subject, different from "E" ("J" resp.), that belongs to a cluster with the same "state" of the cluster of "E" ("J" resp.), choosing the subject that is in cluster with the same "state" of the cluster of "E" ("J" resp.) for which the within clusters simple-matching-distance (measure of internal variance) is smaller.
+
+```{r}
+set.seed(123)
+
+# clustering algoritm with kmeans passing only the factor columns of forecast, i.e. "state" and "subject"
+
+myclusters = kmodes(forecast[,2:3], 11)
+myclusters$modes
+myclusters$withindiff
+```
+
+Since "subjectJ" is in cluster with "stateC", and "stateC" is in clusters with "subjectK", "subjectL" and "subjectI" with a  within clusters simple-matching-distance of zero, we can replace "subjectJ" with one at random between "subjectK", "subjectL" and "subjectI".   
+Since "subjectE" is in cluster with "stateA" with a within clusters simple-matching-distance of zero and "stateA" is in clusters with "subjectI" with a within clusters simple-matching-distance of zero, we can replace "subjectE" with "subjectI".  
+
+```{r}
+forecast$subject[which(forecast$subject=="E")] = "I"
+forecast$subject[which(forecast$subject=="J")] = "L"
+```
+
+Now we can do predictions as before.
+
+```{r}
+head(predict(model, forecast, type='response'))
+tail(predict(model, forecast, type='response'))
+```
